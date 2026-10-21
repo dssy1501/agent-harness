@@ -1,0 +1,14 @@
+{
+  "name": "agent-kernel",
+  "version": "0.1.0",
+  "private": true,
+  "description": "应用内智能体基座：统一内核 + 应用侧能力契约",
+  "type": "module",
+  "scripts": {
+    "test": "node --experimental-strip-types --test examples/*.test.ts",
+    "test:watch": "node --experimental-strip-types --test --watch examples/*.test.ts"
+  },
+  "dependencies": {
+    "zod": "^4.6.7"
+  }
+}

@@ -1,0 +1,19 @@
+# 依赖（zod 等通过 npm i 安装，不入库）
+node_modules/
+
+# 本地 scratch / 运行产物（下划线前缀）
+_*.txt
+_*.json
+_*.log
+
+# 密钥
+.env
+.env.*
+*.secret
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 内核内部数据（不属于交付物）
+.workbuddy/
