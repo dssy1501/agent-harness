@@ -1,14 +1,19 @@
 {
-  "name": "agent-kernel",
+  "name": "agent-harness",
   "version": "0.1.0",
   "private": true,
-  "description": "应用内智能体基座：统一内核 + 应用侧能力契约",
+  "description": "DeepSeek-Harness-inspired agent: provider-agnostic kernel + composable tool plugins (filesystem/shell), wired to DeepSeek. Built incrementally.",
   "type": "module",
   "scripts": {
     "test": "node --experimental-strip-types --test examples/*.test.ts",
-    "test:watch": "node --experimental-strip-types --test --watch examples/*.test.ts"
+    "agent": "node --experimental-strip-types harness/cli.ts",
+    "agent:mock": "node --experimental-strip-types harness/cli.ts --mock",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0"
   }
 }

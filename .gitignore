@@ -17,3 +17,7 @@ Thumbs.db
 
 # 内核内部数据（不属于交付物）
 .workbuddy/
+
+# harness 运行时产物（轨迹日志、临时沙箱）
+runs/
+*.jsonl

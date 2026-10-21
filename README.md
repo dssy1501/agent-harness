@@ -1,195 +1,91 @@
-# agent-kernel
+# agent-harness
 
-应用内智能体基座。目标：**日后每个应用都长在这个内核上，应用侧只写能力契约。**
+一个受 **DeepSeek Harness（dsh）** 启发的智能体：provider 无关的内核 + 可组合的"插件"式工具，接上 DeepSeek 就能在本地工作目录上自主编码。
 
-```
-agent-kernel/
-├── src/
-│   ├── contract.ts    契约：内核与应用的分界线，全项目最重要的文件
-│   ├── tools.ts       Capability → 模型工具定义（schema 翻译）
-│   ├── provider.ts    模型接入层：云端 API + 可脚本化的 Mock
-│   └── kernel.ts      任务循环、上下文装配、权限闸门、预算控制
-└── examples/
-    ├── probe-manifest.ts   探针应用：没有业务，专门用来验证契约
-    └── probe.test.ts       七个用例，覆盖契约的每个分支
-```
+> 设计哲学对齐 dsh 的 *Everything is a plugin*：**模型是灵魂，harness 让智能体理解环境、用工具、在真实环境里持续工作。** 本项目把 dsh 的 Cordis 内核类比物做成了不依赖任何业务的内核，再把"插件"实现成内核契约里的 `Capability`——于是安全（权限闸门 / 快照 / 预算）天然对插件生效，插件不需要自己操心安全。
 
----
+## 它和 DeepSeek Harness 的关系
 
-## 一、这套设计在做的事
-
-大多数"应用 + AI"是这么长的：应用写好了，然后在旁边挂一个聊天窗，
-AI 通过一堆 `if-else` 式的回调去戳应用的内部状态。
-
-这个项目反过来：**把应用的每一个动作都变成一个"能力"，AI 通过统一契约操作能力，
-而不是操作应用内部。** 于是 AI 不是应用的功能，而是应用的另一个客户端——
-和鼠标键盘平级。
-
-这个视角转换带来三个直接后果：
-
-1. **应用必须能被完整地"看见"，而不只能被"操作"。**
-   所以契约里有 `StateProvider`。一个只能干活、看不见状态的智能体是半瞎的。
-2. **每个动作的危险等级必须被显式声明。**
-   所以契约里有 `RiskLevel`。没有分级，就没有"敢让它控制整个应用"的底气。
-3. **每次动作必须能被撤销。**
-   所以契约里有 `Snapshot`。不可撤销的智能体只能当玩具。
-
----
-
-## 二、五个关键设计决策，以及为什么
-
-### 决策 1：一份 zod schema，驱动三件事
-
-```ts
-params: z.object({ label: z.string().min(1) })
-```
-
-同一个 schema 同时是：
-
-- **给模型的 JSON Schema**（`tools.ts` 转成 function calling 定义）
-- **运行时校验器**（模型给了幻觉参数，`safeParse` 直接拒）
-- **TypeScript 类型**（`input` 参数的类型自动推导出来）
-
-如果这三个地方各写一份，它们必然在某天不一致。而这类不一致的 bug
-极难查——你看着代码里的类型是对的，模型看到的 schema 是错的。
-
-### 决策 2：风险等级由内核定义，应用只能选用
-
-```ts
-type RiskLevel = "read" | "reversible-write" | "irreversible-write" | "privileged";
-```
-
-**为什么不能由应用自己定？** 因为"应用 A 的删除"和"应用 B 的删除"
-危险程度完全不同。一旦让每个应用发明自己的等级词汇，
-内核就没法执行统一策略，权限体系会烂掉。
-
-分级依据不是"动作类型"，而是**"出错的代价"**：
-
-| 等级 | 含义 | 例子 |
+| DeepSeek Harness (dsh) | 本项目 | 说明 |
 |---|---|---|
-| `read` | 无副作用 | 查询、列表、读取 |
-| `reversible-write` | 改了能还原 | 新增条目、改名 |
-| `irreversible-write` | 删了就没了 | 清空、永久删除 |
-| `privileged` | 有外部副作用 | 发邮件、上传、付款 |
+| Cordis 内核 | `src/kernel.ts` + `src/contract.ts` | 只认契约，零业务代码 |
+| Plugin（模型/工具/技能/…） | `Capability` + `StateProvider` | 应用/插件只声明"能做什么、危险几级" |
+| 工具集（file / shell / search） | `harness/plugins/*` | 文件系统、终端等可替换插件 |
+| 可追溯会话日志（Trajectory） | `harness/trajectory.ts` | append-only JSONL，可回放/审计 |
+| 多种运行时（Standard/Code/Minimal） | `harness/manifest.ts` 装配不同插件集 | 换工具 = 换个 manifest |
+| 模型接入 | `OpenAICompatibleProvider` | 接 DeepSeek 只需填 baseURL/model |
 
-注意 `privileged` 和 `irreversible-write` 是两回事：
-**发消息是可逆的（能撤回），但它影响了外部世界，照样要人点头。**
-
-### 决策 3：权限是一个旋钮，不是一串开关
-
-```ts
-policy: { maxAutoRisk: "read" }   // 默认：只有只读自动执行
-```
-
-`maxAutoRisk` 的含义是"不低于这个等级的写操作，全部要人确认"。
-默认值是 `read`——**第一版就默认收紧**。
-
-做成单旋钮而不是"要不要确认 A、要不要确认 B"的列表，
-是因为"逐步放权"应该是一件直观的事：对这个应用更放心了，
-就把这个值一级一级往上提。列表式的开关会诱使人一开始就全开。
-
-### 决策 4：观测结果返回 string，不是对象
-
-```ts
-handler: (input) => ({ ok: true, observation: "已新增条目 #3..." })
-```
-
-`observation` 是**给模型看的、会进上下文窗口的字符串**。
-刻意不返回结构化对象，是为了把"上下文长度控制权"交回应用手里——
-只有应用清楚哪些信息对下一步决策真的有用，哪些是噪音。
-
-约定：短、结构化、直接给事实，不要客套话。
-
-### 决策 5：先校验，再确认
-
-`executeOne` 的顺序是死的：
+## 架构
 
 ```
-寻址 → 解析 JSON → schema 校验 → 权限闸门 → 快照 → 执行
+src/                内核（不认识任何业务）
+  contract.ts       契约：内核/应用边界、风险词汇表、事件
+  tools.ts          Capability → 模型工具定义（zod schema 翻译）
+  provider.ts       模型接入：OpenAI 兼容实现 + 可脚本化 Mock
+  kernel.ts         任务循环、上下文装配、权限闸门、预算控制
+harness/            在"内核"这层之上长出的 harness（就是 dsh 的插件运行时）
+  deepseek.ts       把内核接到 api.deepseek.com（OpenAI 兼容）
+  plugins/          文件 / 终端 等插件（每个都是 Capability）
+  manifest.ts       把插件装配成一个"编码 harness"
+  trajectory.ts     每次运行的 append-only 日志
+  cli.ts            命令行入口
+examples/           probe 探针应用 + 确定性测试
 ```
 
-为什么确认必须排在校验后面？**否则你会让人去确认一堆本来就会被拒的参数。**
-让人做无效的决策，很快人就学会无脑点"同意"——闸门就白设计了。
-
----
-
-## 三、探针应用：没想好做什么应用时，先造一个"没有业务的应用"
-
-这是本项目的方法论核心。
-
-**问题**：应用还没定，但如果这时去写内核，内核会被设计成
-"你想象中的应用"的样子，而不是真实需要的样子。
-然后等真做应用时，发现每个真实需求都在推翻当初的抽象。
-
-**解法**：写一个 `probe-manifest.ts`——它的"业务"是刻意设计的，
-唯一目的是把契约的每个分支都逼出来跑一遍：
-
-| 分支 | 探针应用里怎么造 |
-|---|---|
-| 只读能力自动执行 | `probe.list_items`，`risk: read` |
-| 可逆写需要确认 | `probe.add_item`，`risk: reversible-write` |
-| 不可逆写需要确认 | `probe.purge_done`，要求显式传 `confirm: true` |
-| 特权操作需要确认 | `probe.send_report`，模拟发邮件 |
-| 模型幻觉了不存在的能力 | `MockProvider` 脚本里调 `probe.delete_everything` |
-| 模型幻觉了参数 | `includeDone: "yes"`（schema 要 boolean） |
-| handler 抛异常 | `probe.flaky_action`，`force: true` 时抛错 |
-| 易变状态每轮刷新 | `refresh: "always"` 的状态提供者 |
-
-七个分支在探针应用上全对，契约就算立住了。
-之后换真实应用，要担心的就从"内核对不对"变成"我的能力写对没写对"——
-这是两个完全不同量级的问题。
-
-> 注意 `purge_done` 参数里那个 `z.literal(true)`。
-> 这是**故意给模型加的一道门槛**：让它必须显式表达"我确认要删"，
-> 增加它随手乱调的成本。这种小设计比一段 system prompt 管用。
-
----
-
-## 四、MockProvider：不花钱把内核逻辑测成确定性
-
-真实模型每次回答都不同，你的断言就没法写。
-`MockProvider` 让你固定"第一步调 A、第二步调 B、第三步收尾"，
-于是循环逻辑、闸门、预算这些内核行为全部可断言。
-
-```ts
-const provider = new MockProvider([
-  mockToolCall("probe.add_item", { label: "测试" }),
-  mockText("已新增。"),
-]);
-```
-
-这不是测试技巧，这是**基础设施**。内核每改一次，跑一遍这七个用例，
-回归立刻可见。没有它，你每次改内核都要靠手动接真 API 试，
-慢、贵、还不能复现。
-
----
-
-## 五、现在开始
+## 快速开始
 
 ```bash
 npm install
-npm run typecheck    # 契约的类型一致性
-npm test             # 七个契约分支，全绿才算立住
+npm test                # 内核 + harness 共 13 个确定性用例，全绿才算立住
 ```
 
-**下一步该做什么，取决于你想验证什么**：
+跑一个真实任务（需要 DeepSeek key）：
 
-- 想确认内核逻辑真的对 → `npm test`，看七个用例是否全绿
-- 想接真实云端 API → 在 `KernelOptions.provider` 里换上
-  `OpenAICompatibleProvider`，配 `baseURL` / `apiKey` / `model`
-- 想开始做第一个真实应用 → 复制 `probe-manifest.ts` 的结构，
-  把 `capabilities` 和 `stateProviders` 换成你自己的业务
+```bash
+export DEEPSEEK_API_KEY=sk-xxxx
+node --experimental-strip-types harness/cli.ts \
+  --task "给 src 下的 .ts 文件加一行版权头" \
+  --root ./your-project
+```
+
+不接真模型也能跑通整条管线（用脚本化 Mock，不联网不花钱）：
+
+```bash
+node --experimental-strip-types harness/cli.ts --mock --task "demo"
+```
+
+### 权限旋钮（对应 dsh 的"逐步放权"）
+
+`--max-auto-risk` 控制"免确认自动执行"的最高风险等级，默认 `read`：
+
+- `read`：只有读操作自动跑，任何写/命令都弹确认（最安全）
+- `reversible-write`：文件写也自动跑，但命令仍要确认
+- `irreversible-write`：文件写和命令都自动跑（把信任交给智能体）
+
+## 已实现的插件
+
+- **文件系统**（`harness/plugins/filesystem.ts`）：`fs.read_file` / `fs.write_file` / `fs.edit_file`（局部精确替换，要求片段唯一）/ `fs.list_dir` / `fs.glob` / `fs.grep` / `fs.undo`（撤销本会话改写）。全部限制在 `--root` 沙箱内，越界即拒。
+- **终端**（`harness/plugins/shell.ts`）：`shell.run`，风险 `irreversible-write`，默认需确认。
+
+## 测试策略
+
+真实模型不可复现，所以测试用 `MockProvider` 把"第一步调 A、第二步调 B、第三步收尾"固定下来，断言循环/闸门/预算/改盘都正确。`examples/harness.test.ts` 覆盖：默认策略下写被拦、旋钮抬起后编辑+撤销回到原样、shell 默认被拦、轨迹落盘。
+
+## 内核设计决策（精华）
+
+1. 一份 zod schema 同时驱动：模型工具定义 / 运行时校验 / TS 类型。
+2. 风险等级由内核定义、应用只能选用；分级依据是"出错代价"不是"动作类型"。
+3. 权限是单旋钮 `maxAutoRisk`，默认 `read`，宁可停下放权也别一上来全开。
+4. 动作观察返回 string（给模型的上下文），长度控制权交给应用。
+5. 执行顺序死定：寻址 → 解析 → 校验 → 闸门 → 快照 → 执行；校验必须在确认之前。
+
+## 路线图
+
+- [ ] 记忆层（跨会话/跨应用，对治"重复犯同样错误"）
+- [ ] Plan-and-Execute 长任务规划
+- [ ] 交互外壳（确认/diff/打断的共用 UI）
+- [ ] 接更多模型（通义/智谱/Kimi，内核已 provider 无关）
 
 ---
 
-## 六、三条红线
-
-1. **`src/kernel.ts` 里不允许出现任何业务概念。**
-   每次改内核，用 lint 规则或人眼确认一次：这里有没有出现某个应用特有的词。
-   出现一次，边界就开始烂。
-
-2. **没攒到第三个真实用例，不要设计"通用框架"。**
-   凭空想象的抽象会被真实需求挨个推翻。这是平台项目最常见的死法。
-
-3. **宁可让智能体停下来问，也不许它闷头干。**
-   `confirm` 钩子没接的时候，默认行为是拒绝。所有降级方向都应该是"更保守"。
+*本项目为 dsh 启发下的从零实现，并非 DeepSeek 官方仓库的 fork。内核契约与 dsh 的插件哲学一致，但代码独立编写。*
